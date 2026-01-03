@@ -24,7 +24,15 @@ from verl.utils.reward_score import default_compute_score
 class DAPORewardManager(RewardManagerBase):
     """DAPO Reward Manager."""
 
-    def __init__(self, config, tokenizer, compute_score=None, reward_router_address=None, reward_model_tokenizer=None):
+    def __init__(
+        self,
+        config,
+        tokenizer,
+        compute_score=None,
+        reward_router_address=None,
+        reward_model_tokenizer=None,
+        rollout_server_handles=None,
+    ):
         super().__init__(config, tokenizer)
         self.compute_score = compute_score or default_compute_score
         self.is_async_reward_score = inspect.iscoroutinefunction(self.compute_score)
@@ -35,6 +43,7 @@ class DAPORewardManager(RewardManagerBase):
         self.max_resp_len = config.reward_model.get("reward_kwargs", {}).get("max_resp_len", None)
         self.reward_router_address = reward_router_address
         self.reward_model_tokenizer = reward_model_tokenizer
+        self.rollout_server_handles = rollout_server_handles
 
         if self.overlong_buffer_cfg is not None:
             assert self.max_resp_len is not None, (
@@ -59,14 +68,13 @@ class DAPORewardManager(RewardManagerBase):
         response_str = await self.loop.run_in_executor(
             None, lambda: self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
         )
-        extra_reward_kwargs = (
-            {
-                "reward_router_address": self.reward_router_address,
-                "reward_model_tokenizer": self.reward_model_tokenizer,
-            }
-            if self.reward_router_address is not None
-            else {}
-        )
+        extra_reward_kwargs = {}
+        if self.reward_router_address is not None:
+            extra_reward_kwargs["reward_router_address"] = self.reward_router_address
+        if self.reward_model_tokenizer is not None:
+            extra_reward_kwargs["reward_model_tokenizer"] = self.reward_model_tokenizer
+        if self.rollout_server_handles is not None:
+            extra_reward_kwargs["rollout_server_handles"] = self.rollout_server_handles
         if self.is_async_reward_score:
             result = await self.compute_score(
                 data_source=data_source,
