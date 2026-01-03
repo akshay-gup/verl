@@ -361,6 +361,7 @@ class AgentLoopWorkerBase:
         # for recipe to change
         if not hasattr(self, "server_manager"):
             self.server_manager = AsyncLLMServerManager(config, server_handles)
+        self.rollout_server_handles = server_handles
 
         self.dataset_cls = get_dataset_class(config.data)
         self.reward_router_address = reward_router_address
@@ -390,7 +391,7 @@ class AgentLoopWorkerBase:
                     node_id=ray.get_runtime_context().get_node_id(),
                     soft=False,
                 ),
-            ).remote(self.config, self.reward_router_address)
+            ).remote(self.config, self.reward_router_address, self.rollout_server_handles)
 
         trace_config = self.config.actor_rollout_ref.rollout.get("trace", {})
         RolloutTraceConfig.init(

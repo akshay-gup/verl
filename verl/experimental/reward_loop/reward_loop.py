@@ -38,7 +38,12 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 @ray.remote
 class RewardLoopWorker:
-    def __init__(self, config: DictConfig, reward_router_address: str = None):
+    def __init__(
+        self,
+        config: DictConfig,
+        reward_router_address: str = None,
+        rollout_server_handles: list[ray.actor.ActorHandle] | None = None,
+    ):
         """
         RewardLoopWork can tackle reward computation:
         (1) rule-based reward computation
@@ -56,9 +61,11 @@ class RewardLoopWorker:
         Args:
             config: DictConfig, the config for reward loop worker.
             reward_router_address: str, the address of reward router.
+            rollout_server_handles: list[ray.actor.ActorHandle] | None, rollout server actor handles.
         """
         self.config = config
         self.reward_router_address = reward_router_address
+        self.rollout_server_handles = rollout_server_handles
         self._init_reward_fn()
 
     def _init_reward_fn(self):
@@ -98,7 +105,12 @@ class RewardLoopWorker:
             raise ValueError(f"Unknown reward_loop_source: {reward_loop_source}. Must be 'register' or 'importlib'")
 
         self.reward_loop = reward_manager_cls(
-            self.config, self.input_tokenizer, self.reward_fn, self.reward_router_address, self.reward_model_tokenizer
+            config=self.config,
+            tokenizer=self.input_tokenizer,
+            compute_score=self.reward_fn,
+            reward_router_address=self.reward_router_address,
+            reward_model_tokenizer=self.reward_model_tokenizer,
+            rollout_server_handles=self.rollout_server_handles,
         )
 
     async def compute_score_batch(self, data: DataProto) -> list[dict]:
@@ -257,7 +269,7 @@ class RewardLoopManager:
                         node_id=node_id,
                         soft=True,
                     ),
-                ).remote(self.config, self.reward_router_address)
+                ).remote(self.config, self.reward_router_address, None)
             )
 
     # this func is used to replace the legacy fsdp/megatron RewardModelWorker.compute_rm_score

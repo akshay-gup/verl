@@ -47,13 +47,22 @@ class RemoteRewardManager(RewardManagerBase):
     Moreover, process may be more suitable for cpu-intensive requests.
     """
 
-    def __init__(self, config, tokenizer, compute_score=None, reward_router_address=None, reward_model_tokenizer=None):
+    def __init__(
+        self,
+        config,
+        tokenizer,
+        compute_score=None,
+        reward_router_address=None,
+        reward_model_tokenizer=None,
+        rollout_server_handles=None,
+    ):
         super().__init__(config, tokenizer)
         self.compute_score = compute_score or default_compute_score
         self.is_async_reward_score = inspect.iscoroutinefunction(self.compute_score)
         assert not self.is_async_reward_score, "Async reward score is not supported in remote reward manager. "
         self.reward_router_address = reward_router_address
         self.reward_model_tokenizer = reward_model_tokenizer
+        self.rollout_server_handles = rollout_server_handles
         num_reward_workers = config.reward_model.num_workers
         # in the rollout & reward parallel mode
         # the sum of final reward workers will be agent_loop_workers * num_reward_workers
@@ -96,14 +105,13 @@ class RemoteRewardManager(RewardManagerBase):
             None, lambda: self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
         )
 
-        extra_reward_kwargs = (
-            {
-                "reward_router_address": self.reward_router_address,
-                "reward_model_tokenizer": self.reward_model_tokenizer,
-            }
-            if self.reward_router_address is not None
-            else {}
-        )
+        extra_reward_kwargs = {}
+        if self.reward_router_address is not None:
+            extra_reward_kwargs["reward_router_address"] = self.reward_router_address
+        if self.reward_model_tokenizer is not None:
+            extra_reward_kwargs["reward_model_tokenizer"] = self.reward_model_tokenizer
+        if self.rollout_server_handles is not None:
+            extra_reward_kwargs["rollout_server_handles"] = self.rollout_server_handles
 
         reward_worker = self.choose_reward_worker()
         result = await reward_worker.compute_score.remote(

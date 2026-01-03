@@ -345,6 +345,7 @@ class RateLimitedRewardManager(RewardManagerBase):
         compute_score=None,
         reward_router_address=None,
         reward_model_tokenizer=None,
+        rollout_server_handles=None,
         # Legacy (AbstractRewardManager) kwargs for compatibility. Not used.
         num_examine: int | None = None,
         reward_fn_key: str | None = None,
@@ -362,19 +363,19 @@ class RateLimitedRewardManager(RewardManagerBase):
         self.is_async_reward_score = inspect.iscoroutinefunction(self.compute_score)
         self.reward_router_address = reward_router_address
         self.reward_model_tokenizer = reward_model_tokenizer
+        self.rollout_server_handles = rollout_server_handles
         self.timeout = config.reward_model.get("timeout", 300.0)
 
     async def _compute_reward(
         self, data_source: str, solution_str: str, ground_truth: str, extra_info: dict
     ) -> dict | float:
-        extra_reward_kwargs = (
-            {
-                "reward_router_address": self.reward_router_address,
-                "reward_model_tokenizer": self.reward_model_tokenizer,
-            }
-            if self.reward_router_address is not None
-            else {}
-        )
+        extra_reward_kwargs = {}
+        if self.reward_router_address is not None:
+            extra_reward_kwargs["reward_router_address"] = self.reward_router_address
+        if self.reward_model_tokenizer is not None:
+            extra_reward_kwargs["reward_model_tokenizer"] = self.reward_model_tokenizer
+        if self.rollout_server_handles is not None:
+            extra_reward_kwargs["rollout_server_handles"] = self.rollout_server_handles
         if self.is_async_reward_score:
             return await self.compute_score(
                 data_source=data_source,
