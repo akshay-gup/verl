@@ -106,6 +106,8 @@ class RemoteRewardManager(RewardManagerBase):
         )
 
         extra_reward_kwargs = {}
+        if self.tokenizer is not None:
+            extra_reward_kwargs["tokenizer"] = self.tokenizer
         if self.reward_router_address is not None:
             extra_reward_kwargs["reward_router_address"] = self.reward_router_address
         if self.reward_model_tokenizer is not None:

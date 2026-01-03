@@ -370,6 +370,8 @@ class RateLimitedRewardManager(RewardManagerBase):
         self, data_source: str, solution_str: str, ground_truth: str, extra_info: dict
     ) -> dict | float:
         extra_reward_kwargs = {}
+        if self.tokenizer is not None:
+            extra_reward_kwargs["tokenizer"] = self.tokenizer
         if self.reward_router_address is not None:
             extra_reward_kwargs["reward_router_address"] = self.reward_router_address
         if self.reward_model_tokenizer is not None:
