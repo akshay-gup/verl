@@ -306,7 +306,7 @@ class RayPPOTrainer:
             val_reward_fn: Function for computing rewards during validation.
             train_dataset (Optional[Dataset], optional): Training dataset. Defaults to None.
             val_dataset (Optional[Dataset], optional): Validation dataset. Defaults to None.
-            extra_dataset (Optional[Dataset], optional): Extra dataset for ad-hoc evaluation or other uses.
+            extra_dataset (Optional[Dataset], optional): Extra dataset for per-step validation.
             collate_fn: Function to collate data samples into batches.
             train_sampler (Optional[Sampler], optional): Sampler for the training dataset. Defaults to None.
             device_name (str, optional): Device name for training (e.g., "cuda", "cpu"). Defaults to None.
@@ -319,6 +319,9 @@ class RayPPOTrainer:
         self.reward_fn = reward_fn
         self.val_reward_fn = val_reward_fn
         self.extra_dataset = extra_dataset
+
+        if self.extra_dataset is not None and self.val_reward_fn is None:
+            raise ValueError("val_reward_fn must be provided when extra_dataset is set.")
 
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert self.hybrid_engine, "Currently, only support hybrid engine"
@@ -357,9 +360,16 @@ class RayPPOTrainer:
         self.use_prefix_grouper = self.config.actor_rollout_ref.actor.get("use_prefix_grouper", False)
         self.use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
 
-        self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
+        self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler, extra_dataset=extra_dataset)
 
-    def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
+    def _create_dataloader(
+        self,
+        train_dataset,
+        val_dataset,
+        collate_fn,
+        train_sampler: Optional[Sampler],
+        extra_dataset: Optional[Dataset] = None,
+    ):
         """
         Creates the train and validation dataloaders.
         """
@@ -383,6 +393,7 @@ class RayPPOTrainer:
                 max_samples=self.config.data.get("val_max_samples", -1),
             )
         self.train_dataset, self.val_dataset = train_dataset, val_dataset
+        self.extra_dataset = extra_dataset
 
         if train_sampler is None:
             train_sampler = create_rl_sampler(self.config.data, self.train_dataset)
@@ -415,8 +426,25 @@ class RayPPOTrainer:
             collate_fn=collate_fn,
         )
 
+        self.extra_val_dataloader = None
+        if self.extra_dataset is not None:
+            extra_val_batch_size = self.config.data.get("extra_val_batch_size", val_batch_size)
+            if extra_val_batch_size is None:
+                extra_val_batch_size = len(self.extra_dataset)
+
+            self.extra_val_dataloader = StatefulDataLoader(
+                dataset=self.extra_dataset,
+                batch_size=extra_val_batch_size,
+                num_workers=num_workers,
+                shuffle=self.config.data.get("extra_validation_shuffle", True),
+                drop_last=False,
+                collate_fn=collate_fn,
+            )
+
         assert len(self.train_dataloader) >= 1, "Train dataloader is empty!"
         assert len(self.val_dataloader) >= 1, "Validation dataloader is empty!"
+        if self.extra_val_dataloader is not None:
+            assert len(self.extra_val_dataloader) >= 1, "Extra validation dataloader is empty!"
 
         print(
             f"Size of train dataloader: {len(self.train_dataloader)}, Size of val dataloader: "
@@ -608,7 +636,10 @@ class RayPPOTrainer:
 
         return gen_batch
 
-    def _validate(self):
+    def _validate(self, dataloader: Optional[StatefulDataLoader] = None, metrics_prefix: str = "val"):
+        if dataloader is None:
+            dataloader = self.val_dataloader
+
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
 
@@ -620,7 +651,7 @@ class RayPPOTrainer:
         sample_turns = []
         sample_uids = []
 
-        for test_data in self.val_dataloader:
+        for test_data in dataloader:
             test_batch = DataProto.from_single_dict(test_data)
 
             if "uid" not in test_batch.non_tensor_batch:
@@ -712,6 +743,8 @@ class RayPPOTrainer:
         # dump generations
         val_data_dir = self.config.trainer.get("validation_data_dir", None)
         if val_data_dir:
+            if metrics_prefix != "val":
+                val_data_dir = os.path.join(val_data_dir, metrics_prefix)
             self._dump_generations(
                 inputs=sample_inputs,
                 outputs=sample_outputs,
@@ -738,17 +771,17 @@ class RayPPOTrainer:
                         and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best"])
                         and (f"@{n_max}" in metric_name)
                     ):
-                        metric_sec = "val-core"
+                        metric_sec = f"{metrics_prefix}-core"
                     else:
-                        metric_sec = "val-aux"
+                        metric_sec = f"{metrics_prefix}-aux"
                     pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
                     metric_dict[pfx] = metric_val
 
         if len(sample_turns) > 0:
             sample_turns = np.concatenate(sample_turns)
-            metric_dict["val-aux/num_turns/min"] = sample_turns.min()
-            metric_dict["val-aux/num_turns/max"] = sample_turns.max()
-            metric_dict["val-aux/num_turns/mean"] = sample_turns.mean()
+            metric_dict[f"{metrics_prefix}-aux/num_turns/min"] = sample_turns.min()
+            metric_dict[f"{metrics_prefix}-aux/num_turns/max"] = sample_turns.max()
+            metric_dict[f"{metrics_prefix}-aux/num_turns/mean"] = sample_turns.mean()
 
         return metric_dict
 
@@ -1606,6 +1639,13 @@ class RayPPOTrainer:
                         if is_last_step:
                             last_val_metrics = val_metrics
                     metrics.update(val_metrics)
+
+                if self.extra_val_dataloader is not None:
+                    with marked_timer("extra_testing", timing_raw, color="green"):
+                        extra_val_metrics: dict = self._validate(
+                            dataloader=self.extra_val_dataloader, metrics_prefix="extra-val"
+                        )
+                    metrics.update(extra_val_metrics)
 
                 # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
                 esi_close_to_expiration = should_save_ckpt_esi(
