@@ -75,6 +75,7 @@ class ResourcePoolManager:
 
     resource_pool_spec: dict[str, list[int]]
     mapping: dict[Role, str]
+    shared_resource_pools: list[set[str]] = field(default_factory=list)
     resource_pool_dict: dict[str, RayResourcePool] = field(default_factory=dict)
 
     def create_resource_pool(self):
@@ -113,11 +114,19 @@ class ResourcePoolManager:
             for node, node_info in node_available_resources.items()
         }
 
-        # check total required gpus can be satisfied
         total_available_gpus = sum(node_available_gpus.values())
+        pool_totals = {
+            pool_name: sum(process_on_nodes) for pool_name, process_on_nodes in self.resource_pool_spec.items()
+        }
+        shared_pools = [set(group) for group in self.shared_resource_pools]
+        shared_pool_names = {name for group in shared_pools for name in group}
         total_required_gpus = sum(
-            [n_gpus for process_on_nodes in self.resource_pool_spec.values() for n_gpus in process_on_nodes]
+            total for pool_name, total in pool_totals.items() if pool_name not in shared_pool_names
         )
+        for group in shared_pools:
+            shared_totals = [pool_totals[pool_name] for pool_name in group if pool_name in pool_totals]
+            if shared_totals:
+                total_required_gpus += max(shared_totals)
         if total_available_gpus < total_required_gpus:
             raise ValueError(
                 f"Total available GPUs {total_available_gpus} is less than total desired GPUs {total_required_gpus}"
@@ -905,6 +914,8 @@ class RayPPOTrainer:
         wg_kwargs["device_name"] = self.device_name
 
         for resource_pool, class_dict in self.resource_pool_to_cls.items():
+            if not class_dict:
+                continue
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
             wg_dict = self.ray_worker_group_cls(
                 resource_pool=resource_pool,
