@@ -51,6 +51,7 @@ class RewardModelConfig(BaseConfig):
 
     enable: bool = False
     enable_resource_pool: bool = False
+    use_rollout_servers: bool = False
     n_gpus_per_node: int = 0
     nnodes: int = 0
 
