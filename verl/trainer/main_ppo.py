@@ -215,7 +215,15 @@ class TaskRunner:
 
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 
-        resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
+        shared_resource_pools = []
+        if config.reward_model.enable_resource_pool and config.reward_model.use_rollout_servers:
+            shared_resource_pools.append({"global_pool", "reward_pool"})
+
+        resource_pool_manager = ResourcePoolManager(
+            resource_pool_spec=resource_pool_spec,
+            mapping=self.mapping,
+            shared_resource_pools=shared_resource_pools,
+        )
         return resource_pool_manager
 
     def add_reward_model_worker(self, config):
