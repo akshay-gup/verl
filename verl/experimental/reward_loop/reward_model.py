@@ -31,6 +31,8 @@ class RewardModelManager:
         self,
         config: RewardModelConfig,
         resource_pool: RayResourcePool = None,
+        rollout_server_addresses: list[str] | None = None,
+        rollout_replicas: list | None = None,
     ):
         """
         Initialize the reward model manager.
@@ -38,14 +40,23 @@ class RewardModelManager:
         Args:
             config (RewardModelConfig): Reward model configuration.
             resource_pool (RayResourcePool, optional): Resource pool. Defaults to None.
+            rollout_server_addresses (list[str], optional): Existing rollout server addresses to reuse.
+            rollout_replicas (list, optional): Existing rollout replicas to reuse for wake/sleep.
         """
         self.config = config
         self.resource_pool = resource_pool
-        self._initialize_llm_servers()
+        self.rollout_replicas = []
+        self.server_handles = []
+        if rollout_server_addresses is None:
+            self._initialize_llm_servers()
+        else:
+            self.server_addresses = rollout_server_addresses
+            self.rollout_replicas = rollout_replicas or []
         self._initialize_router()
-        assert self.config.rollout.skip_tokenizer_init is False, "Reward model should not skip tokenizer init."
-        if self.config.rollout.free_cache_engine:
-            self.sleep()
+        if rollout_server_addresses is None:
+            assert self.config.rollout.skip_tokenizer_init is False, "Reward model should not skip tokenizer init."
+            if self.config.rollout.free_cache_engine:
+                self.sleep()
 
     def _initialize_llm_servers(self):
         rollout_world_size = self.config.rollout.tensor_model_parallel_size
@@ -106,11 +117,13 @@ class RewardModelManager:
 
     def wake_up(self):
         """Wake up all rollout replica instances."""
-        self._run_all([replica.wake_up() for replica in self.rollout_replicas])
+        if self.rollout_replicas:
+            self._run_all([replica.wake_up() for replica in self.rollout_replicas])
 
     def sleep(self):
         """Sleep all rollout replica instances."""
-        self._run_all([replica.sleep() for replica in self.rollout_replicas])
+        if self.rollout_replicas:
+            self._run_all([replica.sleep() for replica in self.rollout_replicas])
 
     def _run_all(self, tasks: list[asyncio.Task]):
         async def run_all():

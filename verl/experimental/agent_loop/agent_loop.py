@@ -849,11 +849,6 @@ class AgentLoopManager:
         self.worker_group = worker_group
         self.reward_model_manager = None
         self.reward_router_address = None
-        if self.config.reward_model.enable and self.config.reward_model.enable_resource_pool:
-            from verl.experimental.reward_loop import RewardModelManager
-
-            self.reward_model_manager = RewardModelManager(config.reward_model, rm_resource_pool)
-            self.reward_router_address = self.reward_model_manager.get_router_address()
 
         # for recipe to change
         if not hasattr(self, "rollout_replica_class"):
@@ -862,6 +857,19 @@ class AgentLoopManager:
             self.agent_loop_workers_class = ray.remote(AgentLoopWorker)
 
         self._initialize_llm_servers()
+        if self.config.reward_model.enable and self.config.reward_model.enable_resource_pool:
+            from verl.experimental.reward_loop import RewardModelManager
+
+            if self.config.reward_model.use_rollout_servers:
+                self.reward_model_manager = RewardModelManager(
+                    config.reward_model,
+                    rm_resource_pool,
+                    rollout_server_addresses=self.server_addresses,
+                    rollout_replicas=self.rollout_replicas,
+                )
+            else:
+                self.reward_model_manager = RewardModelManager(config.reward_model, rm_resource_pool)
+            self.reward_router_address = self.reward_model_manager.get_router_address()
         self._init_agent_loop_workers()
 
         # Initially we're in sleep mode.

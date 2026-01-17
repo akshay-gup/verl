@@ -488,6 +488,10 @@ Reward Model
   GSM8K and Math examples, we disable reward model. For RLHF alignment
   example using full_hh_rlhf, we utilize reward model to assess the
   responses. If False, the following parameters are not effective.
+- ``reward_model.use_rollout_servers``: Whether to reuse the rollout
+  servers for reward-model routing instead of launching separate reward
+  model workers. When enabled, RewardModelManager will build a router on
+  top of the actor rollout server addresses.
 - ``reward_model.model``
 
   - ``input_tokenizer``: Input tokenizer. If the reward model's chat
