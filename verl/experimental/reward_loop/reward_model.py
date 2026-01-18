@@ -45,6 +45,7 @@ class RewardModelManager:
         """
         self.config = config
         self.resource_pool = resource_pool
+        self.manage_rollout_replicas = rollout_server_addresses is None
         self.rollout_replicas = []
         self.server_handles = []
         if rollout_server_addresses is None:
@@ -117,12 +118,12 @@ class RewardModelManager:
 
     def wake_up(self):
         """Wake up all rollout replica instances."""
-        if self.rollout_replicas:
+        if self.manage_rollout_replicas and self.rollout_replicas:
             self._run_all([replica.wake_up() for replica in self.rollout_replicas])
 
     def sleep(self):
         """Sleep all rollout replica instances."""
-        if self.rollout_replicas:
+        if self.manage_rollout_replicas and self.rollout_replicas:
             self._run_all([replica.sleep() for replica in self.rollout_replicas])
 
     def _run_all(self, tasks: list[asyncio.Task]):
