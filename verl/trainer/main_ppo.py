@@ -213,9 +213,17 @@ class TaskRunner:
             reward_pool = [config.reward_model.n_gpus_per_node] * config.reward_model.nnodes
             resource_pool_spec["reward_pool"] = reward_pool
 
+        shared_resource_pools = []
+        if config.reward_model.enable_resource_pool and config.reward_model.use_rollout_servers:
+            shared_resource_pools = [{global_pool_id, "reward_pool"}]
+
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 
-        resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
+        resource_pool_manager = ResourcePoolManager(
+            resource_pool_spec=resource_pool_spec,
+            mapping=self.mapping,
+            shared_resource_pools=shared_resource_pools,
+        )
         return resource_pool_manager
 
     def add_reward_model_worker(self, config):
