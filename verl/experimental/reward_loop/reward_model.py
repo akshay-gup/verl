@@ -15,6 +15,7 @@
 import asyncio
 import logging
 import os
+from typing import Optional
 
 from verl.single_controller.ray.base import RayResourcePool, split_resource_pool
 from verl.utils.ray_utils import auto_await
@@ -32,6 +33,8 @@ class RewardModelManager:
         self,
         config: RewardModelConfig,
         resource_pool: RayResourcePool = None,
+        rollout_server_addresses: Optional[list[str]] = None,
+        rollout_replicas: Optional[list] = None,
     ):
         """
         Initialize the reward model manager.
@@ -39,9 +42,18 @@ class RewardModelManager:
         Args:
             config (RewardModelConfig): Reward model configuration.
             resource_pool (RayResourcePool, optional): Resource pool. Defaults to None.
+            rollout_server_addresses (Optional[list[str]]): Existing rollout server addresses to reuse.
+            rollout_replicas (Optional[list]): Existing rollout replicas to reuse.
         """
         self.config = config
         self.resource_pool = resource_pool
+        self.rollout_replicas = rollout_replicas
+        self.server_addresses = rollout_server_addresses
+        self.server_handles = None
+        if self.rollout_replicas:
+            self.server_handles = [server._server_handle for server in self.rollout_replicas]
+            if self.server_addresses is None:
+                self.server_addresses = [server._server_address for server in self.rollout_replicas]
 
     @classmethod
     @auto_await
@@ -49,9 +61,19 @@ class RewardModelManager:
         cls,
         config: RewardModelConfig,
         resource_pool: RayResourcePool = None,
+        rollout_server_addresses: Optional[list[str]] = None,
+        rollout_replicas: Optional[list] = None,
     ):
-        instance = cls(config, resource_pool)
-        await instance._initialize_llm_servers()
+        instance = cls(
+            config,
+            resource_pool,
+            rollout_server_addresses=rollout_server_addresses,
+            rollout_replicas=rollout_replicas,
+        )
+        if instance.server_addresses is None:
+            await instance._initialize_llm_servers()
+        elif instance.rollout_replicas is None:
+            instance.rollout_replicas = []
         instance._initialize_router()
         assert config.rollout.skip_tokenizer_init is False, "Reward model should not skip tokenizer init."
         if config.rollout.free_cache_engine:
@@ -118,9 +140,13 @@ class RewardModelManager:
     @auto_await
     async def wake_up(self):
         """Wake up all rollout replica instances."""
+        if not self.rollout_replicas:
+            return
         await asyncio.gather(*[replica.wake_up() for replica in self.rollout_replicas])
 
     @auto_await
     async def sleep(self):
         """Sleep all rollout replica instances."""
+        if not self.rollout_replicas:
+            return
         await asyncio.gather(*[replica.sleep() for replica in self.rollout_replicas])

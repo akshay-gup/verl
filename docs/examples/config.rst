@@ -471,6 +471,7 @@ Reward Model
 
    reward_model:
      enable: False
+     use_rollout_servers: False
      model:
        input_tokenizer: ${actor_rollout_ref.model.path}  # set this to null if the chat template is identical
        path: ~/models/Anomy-RM-v0.1
@@ -488,6 +489,11 @@ Reward Model
   GSM8K and Math examples, we disable reward model. For RLHF alignment
   example using full_hh_rlhf, we utilize reward model to assess the
   responses. If False, the following parameters are not effective.
+- ``reward_model.use_rollout_servers``: Whether to reuse actor rollout
+  servers for reward-model routing instead of launching separate
+  reward-model rollout servers. This is useful when the reward loop
+  should share lifecycle operations (wake/sleep) with existing rollout
+  replicas.
 - ``reward_model.model``
 
   - ``input_tokenizer``: Input tokenizer. If the reward model's chat

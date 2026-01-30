@@ -885,13 +885,25 @@ class AgentLoopManager:
 
         instance = cls(config, worker_group, rollout_resource_pool, rm_resource_pool)
 
+        await instance._initialize_llm_servers(rollout_resource_pool)
+
         if config.reward_model.enable and config.reward_model.enable_resource_pool:
             from verl.experimental.reward_loop import RewardModelManager
 
-            instance.reward_model_manager = await RewardModelManager.create(config.reward_model, rm_resource_pool)
+            rollout_server_addresses = None
+            rollout_replicas = None
+            if config.reward_model.use_rollout_servers:
+                rollout_server_addresses = instance.server_addresses
+                rollout_replicas = instance.rollout_replicas
+
+            instance.reward_model_manager = await RewardModelManager.create(
+                config.reward_model,
+                rm_resource_pool,
+                rollout_server_addresses=rollout_server_addresses,
+                rollout_replicas=rollout_replicas,
+            )
             instance.reward_router_address = instance.reward_model_manager.get_router_address()
 
-        await instance._initialize_llm_servers(rollout_resource_pool)
         instance._init_agent_loop_workers()
         return instance
 
