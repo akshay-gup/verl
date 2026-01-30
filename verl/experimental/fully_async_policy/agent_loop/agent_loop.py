@@ -249,13 +249,25 @@ class FullyAsyncAgentLoopManager(AgentLoopManager):
         return instance
 
     async def _async_init(self):
+        await self._initialize_llm_servers_async()
+
         if self.config.reward_model.enable and self.config.reward_model.enable_resource_pool:
             from verl.experimental.reward_loop import RewardModelManager
 
-            self.reward_model_manager = await RewardModelManager.create(self.config.reward_model, self.rm_resource_pool)
+            rollout_server_addresses = None
+            rollout_replicas = None
+            if self.config.reward_model.use_rollout_servers:
+                rollout_server_addresses = self.server_addresses
+                rollout_replicas = self.rollout_replicas
+
+            self.reward_model_manager = await RewardModelManager.create(
+                self.config.reward_model,
+                self.rm_resource_pool,
+                rollout_server_addresses=rollout_server_addresses,
+                rollout_replicas=rollout_replicas,
+            )
             self.reward_router_address = self.reward_model_manager.get_router_address()
 
-        await self._initialize_llm_servers_async()
         self._init_agent_loop_workers()
 
     async def _initialize_llm_servers_async(self):
