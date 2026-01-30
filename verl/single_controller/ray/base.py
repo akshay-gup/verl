@@ -173,6 +173,7 @@ class ResourcePoolManager:
     resource_pool_spec: dict[str, list[int]]
     mapping: dict[int, str]
     resource_pool_dict: dict[str, RayResourcePool] = field(default_factory=dict)
+    shared_resource_pools: list[set[str]] = field(default_factory=list)
 
     def create_resource_pool(self):
         """Create Ray resource pools for distributed training.
@@ -212,9 +213,22 @@ class ResourcePoolManager:
 
         # check total required gpus can be satisfied
         total_available_gpus = sum(node_available_gpus.values())
-        total_required_gpus = sum(
-            [n_gpus for process_on_nodes in self.resource_pool_spec.values() for n_gpus in process_on_nodes]
-        )
+        pool_totals = {name: sum(process_on_nodes) for name, process_on_nodes in self.resource_pool_spec.items()}
+        pool_names = set(self.resource_pool_spec.keys())
+        shared_pool_names: set[str] = set()
+        for shared_group in self.shared_resource_pools:
+            unknown_pools = shared_group - pool_names
+            if unknown_pools:
+                raise ValueError(f"Shared resource pools reference unknown pools: {sorted(unknown_pools)}")
+            overlap = shared_pool_names.intersection(shared_group)
+            if overlap:
+                raise ValueError(f"Resource pools appear in multiple shared groups: {sorted(overlap)}")
+            shared_pool_names.update(shared_group)
+
+        unshared_pools = pool_names - shared_pool_names
+        total_required_gpus = sum(pool_totals[pool_name] for pool_name in unshared_pools)
+        for shared_group in self.shared_resource_pools:
+            total_required_gpus += max(pool_totals[pool_name] for pool_name in shared_group)
         if total_available_gpus < total_required_gpus:
             raise ValueError(
                 f"Total available GPUs {total_available_gpus} is less than total desired GPUs {total_required_gpus}"
