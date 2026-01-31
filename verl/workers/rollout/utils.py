@@ -41,6 +41,11 @@ async def run_unvicorn(app: FastAPI, server_args, server_address, max_retries=5)
     for i in range(max_retries):
         try:
             server_port, sock = get_free_port(server_address)
+            # Close the socket before uvicorn binds to the port.
+            # With SO_REUSEPORT, leaving it open can cause requests to be
+            # distributed between the original socket and uvicorn's socket,
+            # leading to connection issues or 404 errors.
+            sock.close()
             app.server_args = server_args
             config = uvicorn.Config(app, host=server_address, port=server_port, log_level="warning")
             server = uvicorn.Server(config)
