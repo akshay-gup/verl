@@ -21,6 +21,7 @@ from typing import Any
 
 import aiohttp
 import ray
+import requests
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -48,14 +49,88 @@ async def _read_async_response(resp: aiohttp.ClientResponse) -> dict[str, Any]:
         }
 
 
+def _check_worker_health(worker_urls: list[str], timeout: int = 30, max_wait_time: int = 300) -> None:
+    """Check if all worker servers are healthy and have the required endpoints.
+
+    Args:
+        worker_urls: List of worker URLs to check.
+        timeout: Timeout for each health check request.
+        max_wait_time: Maximum time to wait for all workers to be healthy.
+
+    Raises:
+        RuntimeError: If workers don't become healthy within max_wait_time.
+    """
+    start_time = time.time()
+
+    with requests.Session() as session:
+        while time.time() - start_time < max_wait_time:
+            all_healthy = True
+            for worker_url in worker_urls:
+                try:
+                    # Check /v1/models endpoint (always available in OpenAI-compatible servers)
+                    models_url = f"{worker_url}/v1/models"
+                    response = session.get(models_url, timeout=timeout)
+                    if response.status_code != 200:
+                        all_healthy = False
+                        logger.debug(f"Worker {worker_url} /v1/models returned {response.status_code}")
+                        break
+
+                    # Check /v1/chat/completions endpoint availability
+                    # We send an OPTIONS request to check if the endpoint exists
+                    chat_url = f"{worker_url}/v1/chat/completions"
+                    response = session.options(chat_url, timeout=timeout)
+                    # 405 Method Not Allowed is expected for OPTIONS on POST-only endpoints
+                    # 200 or 405 means the endpoint exists
+                    if response.status_code not in (200, 204, 405):
+                        logger.warning(
+                            f"Worker {worker_url} /v1/chat/completions returned {response.status_code}. "
+                            f"The model may not have a chat template configured. "
+                            f"Consider adding 'chat_template' to your rollout.engine_kwargs.vllm config, "
+                            f"or ensure your model has a chat_template in its tokenizer_config.json."
+                        )
+                        # Don't fail here - the endpoint might still work for POST requests
+                except requests.RequestException as e:
+                    all_healthy = False
+                    logger.debug(f"Health check failed for {worker_url}: {e}")
+                    break
+
+            if all_healthy:
+                logger.info(f"All {len(worker_urls)} workers are healthy")
+                return
+
+            time.sleep(2)
+
+    raise RuntimeError(
+        f"Worker health check failed after {max_wait_time} seconds. "
+        f"Workers: {worker_urls}. "
+        f"Check if vLLM servers are running and accessible."
+    )
+
+
 def launch_router_process(
     worker_urls: list[str],
+    max_wait_time: int = 300,
+    health_check_timeout: int = 30,
 ):
+    """Launch a router process that load-balances requests across worker URLs.
+
+    Args:
+        worker_urls: List of worker URLs to route requests to.
+        max_wait_time: Maximum time to wait for workers to be healthy.
+        health_check_timeout: Timeout for each health check request.
+
+    Returns:
+        Tuple of (router_address, router_process).
+    """
     router_ip = ray.util.get_node_ip_address().strip("[]")
     router_port, _ = get_free_port(router_ip)
     router_address = (
         f"[{router_ip}]:{router_port}" if is_valid_ipv6_address(router_ip) else f"{router_ip}:{router_port}"
     )
+
+    # First, wait for all workers to be healthy before starting the router
+    logger.info(f"Waiting for {len(worker_urls)} workers to be healthy...")
+    _check_worker_health(worker_urls, timeout=health_check_timeout, max_wait_time=max_wait_time)
 
     router_process = multiprocessing.Process(
         target=run_router,
@@ -160,7 +235,18 @@ class NaiveRouter:
             except aiohttp.ClientConnectorError:
                 logger.warning(f"Connection error for {endpoint} (attempt {attempt + 1})")
             except aiohttp.ClientResponseError as e:
-                logger.error(f"HTTP error for {endpoint}: {e}")
+                if e.status == 404 and "chat/completions" in endpoint:
+                    logger.error(
+                        f"HTTP 404 error for {endpoint}: The /v1/chat/completions endpoint is not available. "
+                        f"This usually means the model does not have a chat template configured. "
+                        f"To fix this, either:\n"
+                        f"  1. Use a model with a built-in chat template (e.g., *-Instruct models)\n"
+                        f"  2. Add 'chat_template' to your config: "
+                        f"rollout.engine_kwargs.vllm.chat_template=/path/to/template.jinja2\n"
+                        f"  3. Use /v1/completions endpoint instead of /v1/chat/completions"
+                    )
+                else:
+                    logger.error(f"HTTP error for {endpoint}: {e}")
                 raise
             except Exception as e:
                 logger.error(f"Unexpected error for {endpoint}: {e}")
