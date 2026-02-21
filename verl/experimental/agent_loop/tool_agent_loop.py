@@ -88,6 +88,9 @@ class AgentData:
         # Temporary state for tool calls
         self.tool_calls: list[FunctionCall] = []
 
+        # Accumulated tool call names across all turns
+        self.tool_call_names: list[str] = []
+
         # Extra fields for dynamic addition, e.g., tool session data
         self.extra_fields: dict[str, Any] = {}
 
@@ -205,7 +208,11 @@ class ToolAgentLoop(AgentLoopBase):
             metrics=agent_data.metrics,
             extra_fields={},
         )
-        output.extra_fields.update({"turn_scores": agent_data.turn_scores, "tool_rewards": agent_data.tool_rewards})
+        output.extra_fields.update({
+            "turn_scores": agent_data.turn_scores,
+            "tool_rewards": agent_data.tool_rewards,
+            "tool_call_names": agent_data.tool_call_names,
+        })
         return output
 
     async def _handle_pending_state(self, agent_data: AgentData, sampling_params: dict[str, Any]) -> AgentState:
@@ -287,6 +294,9 @@ class ToolAgentLoop(AgentLoopBase):
         for tool_call in agent_data.tool_calls[: self.max_parallel_calls]:
             tasks.append(self._call_tool(tool_call, agent_data.tools_kwargs, agent_data))
             tool_call_names.append(tool_call.name)
+
+        # Accumulate tool call names across all turns for downstream heuristics
+        agent_data.tool_call_names.extend(tool_call_names)
 
         with simple_timer("tool_calls", agent_data.metrics):
             responses = await asyncio.gather(*tasks)

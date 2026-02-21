@@ -28,6 +28,7 @@ from verl.experimental.fully_async_policy.detach_utils import (
     assemble_batch_from_rollout_samples,
 )
 from verl.experimental.fully_async_policy.message_queue import MessageQueueClient
+from verl.experimental.fully_async_policy.sample_buffer import SampleBuffer
 from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo import core_algos
@@ -141,6 +142,17 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         )
         self.metrics_aggregator = MetricsAggregator(total_gpus=total_gpus)
 
+        # Sample buffer for heuristic-based selection.
+        # buffer_size_multiplier controls how many extra samples to accumulate
+        # beyond required_samples before selecting via the heuristic.
+        # When <= 1 (or absent), the buffer is effectively pass-through (FIFO).
+        buffer_size_multiplier = config.async_training.get("sample_buffer_size_multiplier", 1)
+        buffer_capacity = max(int(self.required_samples * buffer_size_multiplier), self.required_samples)
+        self.sample_buffer = SampleBuffer(
+            buffer_size=buffer_capacity,
+            score_fn=None,  # default FIFO; override via set_sample_buffer_score_fn()
+        )
+
         # use trainer to do validation
         if self.config.async_training.use_trainer_do_validate:
             from verl.trainer.main_ppo import create_rl_dataset
@@ -180,6 +192,17 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
         """Set parameter synchronizer"""
         self.param_synchronizer = param_synchronizer
 
+    def set_sample_buffer_score_fn(self, score_fn):
+        """Set the heuristic scoring function for the sample buffer.
+
+        ``score_fn`` receives a ``RolloutSample`` and should return a float.
+        Higher-scored samples are selected first for training.
+
+        Use ``self.sample_buffer.get_tool_call_names(sample)`` inside
+        ``score_fn`` to inspect which tools were called during rollout.
+        """
+        self.sample_buffer.score_fn = score_fn
+
     def set_total_train_steps(self, total_train_steps):
         self.total_train_steps = total_train_steps
         self.progress_bar = tqdm(total=self.total_train_steps, initial=0, desc="Training Progress")
@@ -190,54 +213,66 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
 
     def _get_samples_from_queue(self) -> tuple[None, None] | tuple[int, Any]:
         """
-        Get samples from message queue and compose gen_batch_output
-        Uses a loop to continuously collect samples until enough are gathered
+        Get samples from message queue, feed them into the sample buffer,
+        and select the best ``required_samples`` via the buffer's heuristic.
+
+        When no custom score_fn is set the buffer behaves as FIFO, preserving
+        the original behavior.
 
         Returns:
-            tuple: (epoch, batch_dict, gen_batch_output)
+            tuple: (epoch, batch) or (None, None) on termination
         """
+        needed = self.required_samples - self.sample_buffer.size
         print(
-            f"[FullyAsyncTrainer] Requesting {self.required_samples} samples from queue",
+            f"[FullyAsyncTrainer] Requesting {needed} samples from queue "
+            f"(buffer has {self.sample_buffer.size}, need {self.required_samples})",
             flush=True,
         )
 
-        # Collect samples using a simple loop calling get_sample
+        # Pull from the message queue until the buffer has enough samples
         consumer_start = time.time()
-        queue_samples = []
+        fetched = 0
         queue_len = 0
-        while len(queue_samples) < self.required_samples:
-            # Get a single sample and wait until there is a sample or None is received
+        terminated = False
+        while self.sample_buffer.size < self.required_samples:
             sample, queue_len = self.message_queue_client.get_sample_sync()
 
             if sample is None:
                 print(
                     f"[FullyAsyncTrainer] Detected termination signal (None), stopping sample collection. "
-                    f"Collected {len(queue_samples)}/{self.required_samples} samples"
+                    f"Buffer has {self.sample_buffer.size}/{self.required_samples} samples"
                 )
+                terminated = True
                 break
 
-            queue_samples.append(sample)
+            deserialized = ray.cloudpickle.loads(sample)
+            self.sample_buffer.add(deserialized)
+            fetched += 1
 
-            if len(queue_samples) % 64 == 0:
+            if fetched % 64 == 0:
                 print(
-                    f"[FullyAsyncTrainer] Collected {len(queue_samples)}/{self.required_samples} samples. "
-                    f"mq_len: {queue_len}"
+                    f"[FullyAsyncTrainer] Fetched {fetched} samples into buffer "
+                    f"(buffer={self.sample_buffer.size}). mq_len: {queue_len}"
                 )
 
         consumer_end = time.time()
 
-        if not queue_samples or len(queue_samples) < self.required_samples:
+        if terminated and self.sample_buffer.size < self.required_samples:
             print("[FullyAsyncTrainer] not enough samples collected after loop")
             return None, None
+
         total_wait_time = consumer_end - consumer_start
 
+        # Select best samples from buffer via heuristic
+        queue_samples = self.sample_buffer.select(self.required_samples)
+        buf_stats = self.sample_buffer.get_statistics()
+
         print(
-            f"[FullyAsyncTrainer] Loop collection completed: {len(queue_samples)}/{self.required_samples} samples, "
-            f"total wait time: {total_wait_time:.2f} seconds."
-            f"mq_len: {queue_len}"
+            f"[FullyAsyncTrainer] Selected {len(queue_samples)}/{self.required_samples} samples "
+            f"(fetched {fetched} new, buffer remaining={buf_stats['buffer_size']}), "
+            f"total wait time: {total_wait_time:.2f}s. mq_len: {queue_len}"
         )
 
-        queue_samples = [ray.cloudpickle.loads(x) for x in queue_samples]
         # Assemble batch - now working directly with RolloutSample objects
         if self.config.trainer.balance_batch:
             batch = assemble_batch_from_rollout_samples(queue_samples, self.tokenizer, self.config, self._balance_batch)
@@ -245,6 +280,8 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
             batch = assemble_batch_from_rollout_samples(queue_samples, self.tokenizer, self.config, None)
 
         batch.meta_info["fully_async/total_wait_time"] = total_wait_time
+        batch.meta_info["fully_async/sample_buffer/remaining"] = buf_stats["buffer_size"]
+        batch.meta_info["fully_async/sample_buffer/total_evicted"] = buf_stats["total_evicted"]
         return 0, batch
 
     def _create_actor_rollout_classes(self):

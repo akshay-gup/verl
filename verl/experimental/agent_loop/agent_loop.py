@@ -782,6 +782,7 @@ class AgentLoopWorker:
         default_extra_keys = {
             "turn_scores",
             "tool_rewards",
+            "tool_call_names",
             "is_cancel",
             "param_version_start",
             "param_version_end",

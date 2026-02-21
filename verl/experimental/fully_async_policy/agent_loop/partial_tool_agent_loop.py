@@ -263,6 +263,7 @@ class AsyncPartialToolAgentLoop(ToolAgentLoop):
             {
                 "turn_scores": agent_data.turn_scores,
                 "tool_rewards": agent_data.tool_rewards,
+                "tool_call_names": agent_data.tool_call_names,
                 "is_cancel": False,
                 "param_version_start": agent_data.extra_fields["param_version_start"],
                 "param_version_end": param_version,
